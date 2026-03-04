@@ -12,6 +12,9 @@ app.use(express.json()); //middleware to read req body
 app.use(cookieParser());
 
 // routes usage
+app.get("/", (req, res) => {
+  res.send("Bank Ledger server is up and running");
+});
 app.use("/api/auth", authRouter);
 app.use("/api/account", accountRouter);
 app.use("/api/transactions", transactionRouter);
