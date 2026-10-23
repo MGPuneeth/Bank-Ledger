@@ -79,12 +79,13 @@ async function transactionController(req, res) {
   console.log(balance);
 
   // create transaction
+  const session = await mongoose.startSession();
+  let transaction;
   try {
-    const session = await mongoose.startSession();
     session.startTransaction(); //Helps in maintaining atomicity
 
-    console.log("transactikon initiated");
-    const transaction = (
+    console.log("transaction initiated");
+    transaction = (
       await transactionModel.create(
         [
           {
@@ -138,26 +139,26 @@ async function transactionController(req, res) {
     await transaction.save({ session });
 
     await session.commitTransaction();
-    session.endSession();
-
-    // Send Email
-    await sendTransactionEmail(
-      req.user.email,
-      req.user.name,
-      amount,
-      toAccount,
-    );
-
-    return res.status(201).json({
-      message: "Transaction completed succesfully",
-      transaction: transaction,
-    });
   } catch (err) {
+    console.error("Transaction failed:", err);
+    if (session.inTransaction()) {
+      await session.abortTransaction();
+    }
+
     return res.status(400).json({
-      message:
-        "Transaction is Pending due to some issue. Please retry after some time",
+      message: "Transaction failed and was rolled back. Please retry",
     });
+  } finally {
+    await session.endSession();
   }
+
+  // Send Email
+  await sendTransactionEmail(req.user.email, req.user.name, amount, toAccount);
+
+  return res.status(201).json({
+    message: "Transaction completed succesfully",
+    transaction: transaction,
+  });
 }
 
 async function createInitialFundsTransaction(req, res) {
@@ -190,44 +191,57 @@ async function createInitialFundsTransaction(req, res) {
   }
 
   const session = await mongoose.startSession();
-  session.startTransaction();
+  let transaction;
+  try {
+    session.startTransaction();
 
-  const transaction = new transactionModel({
-    fromAccount: fromUserAccount._id,
-    toAccount,
-    amount,
-    idempotencyKey,
-    status: "PENDING",
-  });
+    transaction = new transactionModel({
+      fromAccount: fromUserAccount._id,
+      toAccount,
+      amount,
+      idempotencyKey,
+      status: "PENDING",
+    });
 
-  const debitLedgerEntry = await ledgerModel.create(
-    [
-      {
-        account: fromUserAccount._id,
-        amount,
-        transaction: transaction._id,
-        type: "DEBIT",
-      },
-    ],
-    { session },
-  );
-  const creditLedgerEntry = await ledgerModel.create(
-    [
-      {
-        account: toAccount,
-        amount,
-        transaction: transaction._id,
-        type: "CREDIT",
-      },
-    ],
-    { session },
-  );
+    const debitLedgerEntry = await ledgerModel.create(
+      [
+        {
+          account: fromUserAccount._id,
+          amount,
+          transaction: transaction._id,
+          type: "DEBIT",
+        },
+      ],
+      { session },
+    );
+    const creditLedgerEntry = await ledgerModel.create(
+      [
+        {
+          account: toAccount,
+          amount,
+          transaction: transaction._id,
+          type: "CREDIT",
+        },
+      ],
+      { session },
+    );
 
-  transaction.status = "COMPLETED";
-  await transaction.save({ session });
+    transaction.status = "COMPLETED";
+    await transaction.save({ session });
 
-  await session.commitTransaction();
-  session.endSession();
+    await session.commitTransaction();
+  } catch (err) {
+    console.error("Initial funds transaction failed:", err);
+    if (session.inTransaction()) {
+      await session.abortTransaction();
+    }
+
+    return res.status(400).json({
+      message: "Transaction failed and was rolled back. Please retry",
+    });
+  } finally {
+    await session.endSession();
+  }
 
   // Send Email
   await sendTransactionEmail(req.user.email, req.user.name, amount, toAccount);
